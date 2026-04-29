@@ -222,6 +222,48 @@ bool ESPOTADASH::registerNow() {
   _lastRegisterAttempt = millis();
   if (WiFi.status() != WL_CONNECTED || _serverUrl.length() == 0) return false;
 
+#if defined(LIBRETINY)
+  // HTTPClient is not used on LibreTiny to avoid pulling in setCookie()
+  // which calls strptime(), missing from the arm-none-eabi newlib on BK72xx.
+  String hostport = _serverUrl;
+  if (hostport.startsWith("http://"))  hostport = hostport.substring(7);
+  else if (hostport.startsWith("https://")) hostport = hostport.substring(8);
+
+  String host;
+  uint16_t port = 80;
+  int colon = hostport.indexOf(':');
+  if (colon >= 0) {
+    host = hostport.substring(0, colon);
+    port = (uint16_t)hostport.substring(colon + 1).toInt();
+  } else {
+    host = hostport;
+  }
+
+  String body = buildInfoJson();
+  WiFiClient client;
+  client.setTimeout(5);
+  if (!client.connect(host.c_str(), port)) return false;
+
+  String req;
+  req.reserve(128 + body.length());
+  req += "POST /api/register HTTP/1.1\r\n";
+  req += "Host: " + host + ":" + String(port) + "\r\n";
+  req += "Content-Type: application/json\r\n";
+  req += "Content-Length: " + String(body.length()) + "\r\n";
+  req += "Connection: close\r\n\r\n";
+  req += body;
+  client.print(req);
+
+  unsigned long deadline = millis() + 5000;
+  while (!client.available() && millis() < deadline) delay(10);
+  String statusLine = client.readStringUntil('\n');
+  client.stop();
+
+  int sp = statusLine.indexOf(' ');
+  if (sp < 0) return false;
+  int code = statusLine.substring(sp + 1).toInt();
+  return (code >= 200 && code < 300);
+#else
   WiFiClient client;
   HTTPClient http;
   http.setTimeout(5000);
@@ -231,6 +273,7 @@ bool ESPOTADASH::registerNow() {
   int code = http.POST(buildInfoJson());
   http.end();
   return (code >= 200 && code < 300);
+#endif
 }
 
 String ESPOTADASH::buildInfoJson() {

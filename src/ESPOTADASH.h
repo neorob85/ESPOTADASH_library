@@ -8,7 +8,6 @@
 #if defined(LIBRETINY)
   #include <WiFi.h>
   #include <WebServer.h>
-  #include <HTTPClient.h>
   using ESPOTADASH_WebServer = WebServer;
 #elif defined(ESP32)
   #include <ArduinoOTA.h>

@@ -1,6 +1,6 @@
 {
   "name": "ESPOTADASH",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Auto-register ESP8266/ESP32/LibreTiny devices with a Node.js dashboard server and respond to ping/info requests.",
   "keywords": "esp8266, esp32, libretiny, dashboard, monitoring, iot, ota",
   "repository": {
