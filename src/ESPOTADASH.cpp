@@ -1,6 +1,8 @@
 #include "ESPOTADASH.h"
 
-#if defined(ESP32)
+#if defined(LIBRETINY)
+  #include <Update.h>
+#elif defined(ESP32)
   #include <Update.h>
   #include <esp_system.h>
 #else
@@ -8,6 +10,18 @@
 #endif
 
 static const unsigned long DEFAULT_REGISTER_INTERVAL = 15UL * 60UL * 1000UL; // 15 minutes
+
+static String formatIp(const IPAddress& ip) {
+#if defined(LIBRETINY)
+  // LibreTiny's IPAddress has no toString() and wiring_compat.cpp may not be
+  // linked; build the dotted-quad manually.
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
+  return String(buf);
+#else
+  return ip.toString();
+#endif
+}
 
 static String jsonEscape(const String& s) {
   String out;
@@ -48,6 +62,7 @@ static String extractJsonString(const String& json, const String& key) {
   return json.substring(qi + 1, qe);
 }
 
+#if !defined(LIBRETINY)
 static bool parseJsonByteArray(const String& json, const String& key, uint8_t* buf, uint16_t size) {
   String search = "\"" + key + "\"";
   int ki = json.indexOf(search);
@@ -70,8 +85,9 @@ static bool parseJsonByteArray(const String& json, const String& key, uint8_t* b
   }
   return idx == size;
 }
+#endif
 
-#if defined(ESP32)
+#if defined(ESP32) && !defined(LIBRETINY)
 static String getResetReasonString() {
   switch (esp_reset_reason()) {
     case ESP_RST_POWERON:   return "Power on";
@@ -91,14 +107,21 @@ static String getResetReasonString() {
 
 ESPOTADASH::ESPOTADASH(uint16_t localPort, uint16_t eepromSize, bool littlefs)
   : _localPort(localPort),
-    _eepromSize(eepromSize),
     _registerInterval(DEFAULT_REGISTER_INTERVAL),
     _lastRegisterAttempt(0),
     _wasConnected(false),
     _begun(false),
+#if !defined(LIBRETINY)
+    _eepromSize(eepromSize),
     _littlefsEnabled(littlefs),
     _fsUploadOk(false),
-    _httpServer(localPort) {}
+#endif
+    _httpServer(localPort) {
+#if defined(LIBRETINY)
+  (void)eepromSize;
+  (void)littlefs;
+#endif
+}
 
 void ESPOTADASH::addCommand(const String& name, const String& description, std::function<void()> callback) {
   _commands.push_back({ name, description, callback });
@@ -111,7 +134,9 @@ void ESPOTADASH::begin(const String& serverUrl, const String& deviceName, const 
   if (deviceName.length()) {
     _deviceName = deviceName;
   } else {
-#if defined(ESP32)
+#if defined(LIBRETINY)
+    _deviceName = String(LT.getDeviceName());
+#elif defined(ESP32)
     _deviceName = String(WiFi.getHostname());
 #else
     _deviceName = WiFi.hostname();
@@ -124,12 +149,14 @@ void ESPOTADASH::begin(const String& serverUrl, const String& deviceName, const 
   _httpServer.on("/ping",         HTTP_GET,  [this]() { this->handlePing();        });
   _httpServer.on("/info",         HTTP_GET,  [this]() { this->handleInfo();        });
   _httpServer.on("/cmd",          HTTP_POST, [this]() { this->handleCmd();         });
-  _httpServer.on("/eeprom",       HTTP_GET,  [this]() { this->handleEepromGet();   });
-  _httpServer.on("/eeprom",       HTTP_POST, [this]() { this->handleEepromWrite(); });
-  _httpServer.on("/eeprom/format",HTTP_POST, [this]() { this->handleEepromFormat();});
   _httpServer.on("/update",        HTTP_POST,
     [this]() { this->handleUpdateFinish(); },
     [this]() { this->handleUpdateUpload(); });
+
+#if !defined(LIBRETINY)
+  _httpServer.on("/eeprom",       HTTP_GET,  [this]() { this->handleEepromGet();   });
+  _httpServer.on("/eeprom",       HTTP_POST, [this]() { this->handleEepromWrite(); });
+  _httpServer.on("/eeprom/format",HTTP_POST, [this]() { this->handleEepromFormat();});
 
   if (_littlefsEnabled) {
     LittleFS.begin();
@@ -142,14 +169,19 @@ void ESPOTADASH::begin(const String& serverUrl, const String& deviceName, const 
       [this]() { this->handleFsUploadFinish(); },
       [this]() { this->handleFsUploadData();   });
   }
+#endif
 
   _httpServer.begin();
 
+#if !defined(LIBRETINY)
   EEPROM.begin(_eepromSize);
 
   ArduinoOTA.setHostname(_deviceName.c_str());
   if (otaPassword.length()) ArduinoOTA.setPassword(otaPassword.c_str());
   ArduinoOTA.begin();
+#else
+  (void)otaPassword;
+#endif
 
   _begun = true;
   _wasConnected = (WiFi.status() == WL_CONNECTED);
@@ -158,7 +190,9 @@ void ESPOTADASH::begin(const String& serverUrl, const String& deviceName, const 
 
 void ESPOTADASH::loop() {
   if (!_begun) return;
+#if !defined(LIBRETINY)
   ArduinoOTA.handle();
+#endif
   _httpServer.handleClient();
 
   bool connected = (WiFi.status() == WL_CONNECTED);
@@ -177,12 +211,16 @@ void ESPOTADASH::setRegisterInterval(unsigned long intervalMs) {
 }
 
 void ESPOTADASH::setEepromSize(uint16_t size) {
+#if !defined(LIBRETINY)
   _eepromSize = size;
+#else
+  (void)size;
+#endif
 }
 
 bool ESPOTADASH::registerNow() {
   _lastRegisterAttempt = millis();
-  if (WiFi.status() != WL_CONNECTED || _serverUrl.isEmpty()) return false;
+  if (WiFi.status() != WL_CONNECTED || _serverUrl.length() == 0) return false;
 
   WiFiClient client;
   HTTPClient http;
@@ -201,22 +239,30 @@ String ESPOTADASH::buildInfoJson() {
   s += "{";
   s += "\"id\":\""                + jsonEscape(WiFi.macAddress())           + "\",";
   s += "\"name\":\""              + jsonEscape(_deviceName)                 + "\",";
-  s += "\"ip\":\""                + WiFi.localIP().toString()               + "\",";
+  s += "\"ip\":\""                + formatIp(WiFi.localIP())                + "\",";
   s += "\"mac\":\""               + WiFi.macAddress()                       + "\",";
-#if defined(ESP32)
+#if defined(LIBRETINY)
+  s += "\"hostname\":\""          + jsonEscape(String(LT.getDeviceName()))  + "\",";
+#elif defined(ESP32)
   s += "\"hostname\":\""          + jsonEscape(String(WiFi.getHostname()))  + "\",";
 #else
   s += "\"hostname\":\""          + jsonEscape(WiFi.hostname())             + "\",";
 #endif
   s += "\"port\":"                + String(_localPort)                      + ",";
-#if defined(ESP32)
+#if defined(LIBRETINY)
+  s += "\"chipId\":"              + String(ESP.getChipId())                 + ",";
+#elif defined(ESP32)
   s += "\"chipId\":"              + String((uint32_t)ESP.getEfuseMac())     + ",";
 #else
   s += "\"chipId\":"              + String(ESP.getChipId())                 + ",";
 #endif
   s += "\"cpuFreqMHz\":"          + String(ESP.getCpuFreqMHz())             + ",";
   s += "\"freeHeap\":"            + String(ESP.getFreeHeap())               + ",";
-#if defined(ESP32)
+#if defined(LIBRETINY)
+  s += "\"heapSize\":"            + String(LT.getHeapSize())                + ",";
+  s += "\"heapMinFree\":"         + String(LT.getMinFreeHeap())             + ",";
+  s += "\"ramSize\":"             + String(LT.getRamSize())                 + ",";
+#elif defined(ESP32)
   s += "\"maxFreeBlockSize\":"    + String(ESP.getMaxAllocHeap())           + ",";
 #else
   s += "\"heapFragmentation\":"   + String(ESP.getHeapFragmentation())      + ",";
@@ -224,11 +270,29 @@ String ESPOTADASH::buildInfoJson() {
   s += "\"flashChipRealSize\":"   + String(ESP.getFlashChipRealSize())      + ",";
 #endif
   s += "\"flashChipSize\":"       + String(ESP.getFlashChipSize())          + ",";
+#if defined(LIBRETINY)
+  s += "\"flashChipRealSize\":"   + String(ESP.getFlashChipRealSize())      + ",";
+  #if defined(LT_BK72XX)
+  {
+    // Compute firmware size from linker symbols: all flash content from the app
+    // start up to and including the .data section stored in flash.
+    extern char _vector_start, _data_flash_begin, _data_ram_begin, _data_ram_end;
+    uint32_t sz = (uint32_t)&_data_flash_begin
+                + ((uint32_t)&_data_ram_end - (uint32_t)&_data_ram_begin)
+                - (uint32_t)&_vector_start;
+    s += "\"sketchSize\":"        + String(sz)                              + ",";
+  }
+  #endif
+#else
   s += "\"flashChipSpeed\":"      + String(ESP.getFlashChipSpeed())         + ",";
   s += "\"sketchSize\":"          + String(ESP.getSketchSize())             + ",";
   s += "\"freeSketchSpace\":"     + String(ESP.getFreeSketchSpace())        + ",";
+#endif
   s += "\"sdkVersion\":\""        + jsonEscape(String(ESP.getSdkVersion())) + "\",";
-#if defined(ESP32)
+#if defined(LIBRETINY)
+  s += "\"coreVersion\":\""       + jsonEscape(ESP.getCoreVersion())        + "\",";
+  s += "\"resetReason\":\""       + jsonEscape(ESP.getResetReason())        + "\",";
+#elif defined(ESP32)
   s += "\"resetReason\":\""       + jsonEscape(getResetReasonString())      + "\",";
 #else
   s += "\"coreVersion\":\""       + jsonEscape(ESP.getCoreVersion())        + "\",";
@@ -239,26 +303,30 @@ String ESPOTADASH::buildInfoJson() {
   s += "\"uptime\":"              + String(millis())                        + ",";
   if (_firmwareVersion.length())
     s += "\"firmwareVersion\":\"" + jsonEscape(_firmwareVersion)            + "\",";
-#if defined(ESP32)
+#if defined(LIBRETINY)
+  s += "\"platform\":\"LibreTiny\",";
+#elif defined(ESP32)
   s += "\"platform\":\"ESP32\",";
 #else
   s += "\"platform\":\"ESP8266\",";
 #endif
+#if !defined(LIBRETINY)
   s += "\"littlefs\":";
   s += _littlefsEnabled ? "true" : "false";
   s += ",";
   if (_littlefsEnabled) {
-#if defined(ESP32)
+  #if defined(ESP32)
     s += "\"lfsTotal\":" + String(LittleFS.totalBytes()) + ",";
     s += "\"lfsUsed\":"  + String(LittleFS.usedBytes())  + ",";
-#else
+  #else
     FSInfo fs_info;
     if (LittleFS.info(fs_info)) {
       s += "\"lfsTotal\":" + String(fs_info.totalBytes) + ",";
       s += "\"lfsUsed\":"  + String(fs_info.usedBytes)  + ",";
     }
-#endif
+  #endif
   }
+#endif
   s += "\"commands\":[";
   for (size_t i = 0; i < _commands.size(); i++) {
     if (i > 0) s += ",";
@@ -310,6 +378,41 @@ void ESPOTADASH::handleCmd() {
   _httpServer.send(404, "application/json", "{\"ok\":false,\"error\":\"unknown command\"}");
 }
 
+void ESPOTADASH::handleUpdateUpload() {
+  HTTPUpload& upload = _httpServer.upload();
+  if (upload.status == UPLOAD_FILE_START) {
+#if defined(LIBRETINY)
+    Update.begin();
+#else
+    uint32_t maxSketchSpace = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
+  #if !defined(ESP32)
+    Update.runAsync(true);
+  #endif
+    if (!Update.begin(maxSketchSpace)) {
+      Update.end();
+    }
+#endif
+  } else if (upload.status == UPLOAD_FILE_WRITE) {
+    Update.write(upload.buf, upload.currentSize);
+  } else if (upload.status == UPLOAD_FILE_END) {
+    Update.end(true);
+  }
+}
+
+void ESPOTADASH::handleUpdateFinish() {
+  if (Update.hasError()) {
+    _httpServer.send(500, "application/json", "{\"ok\":false,\"error\":\"update failed\"}");
+  } else {
+    _httpServer.send(200, "application/json", "{\"ok\":true}");
+    delay(200);
+    ESP.restart();
+  }
+}
+
+#if !defined(LIBRETINY)
+
+// ---- EEPROM handlers ----
+
 void ESPOTADASH::handleEepromGet() {
   String s;
   s.reserve((size_t)_eepromSize * 4 + 64);
@@ -350,33 +453,6 @@ void ESPOTADASH::handleEepromFormat() {
   }
   EEPROM.commit();
   _httpServer.send(200, "application/json", "{\"ok\":true}");
-}
-
-void ESPOTADASH::handleUpdateUpload() {
-  HTTPUpload& upload = _httpServer.upload();
-  if (upload.status == UPLOAD_FILE_START) {
-    uint32_t maxSketchSpace = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
-#if !defined(ESP32)
-    Update.runAsync(true);
-#endif
-    if (!Update.begin(maxSketchSpace)) {
-      Update.end();
-    }
-  } else if (upload.status == UPLOAD_FILE_WRITE) {
-    Update.write(upload.buf, upload.currentSize);
-  } else if (upload.status == UPLOAD_FILE_END) {
-    Update.end(true);
-  }
-}
-
-void ESPOTADASH::handleUpdateFinish() {
-  if (Update.hasError()) {
-    _httpServer.send(500, "application/json", "{\"ok\":false,\"error\":\"update failed\"}");
-  } else {
-    _httpServer.send(200, "application/json", "{\"ok\":true}");
-    delay(200);
-    ESP.restart();
-  }
 }
 
 // ---- LittleFS handlers ----
@@ -538,3 +614,5 @@ void ESPOTADASH::handleFsUploadFinish() {
   _httpServer.send(200, "application/json",
     "{\"ok\":true,\"path\":\"" + jsonEscape(_fsUploadPath) + "\"}");
 }
+
+#endif // !LIBRETINY

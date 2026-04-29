@@ -1,6 +1,6 @@
 # ESPOTADASH — API Reference
 
-ESPOTADASH is an Arduino library for ESP8266 and ESP32 that automatically registers a device with a Node.js dashboard server. It exposes a local HTTP interface for monitoring, remote commands, OTA firmware updates, and LittleFS filesystem management.
+ESPOTADASH is an Arduino library for ESP8266, ESP32 and LibreTiny that automatically registers a device with a Node.js dashboard server. It exposes a local HTTP interface for monitoring, remote commands, OTA firmware updates, and (on ESP8266/ESP32) LittleFS filesystem management.
 
 You need first install the server at https://github.com/neorob85/ESPOTADASH_server.git
 
@@ -21,16 +21,17 @@ You need first install the server at https://github.com/neorob85/ESPOTADASH_serv
   - [setEepromSize()](#seteepromsize)
   - [buildInfoJson()](#buildinfojson)
 - [HTTP Endpoints](#http-endpoints)
-- [ESP8266 / ESP32 Compatibility](#esp8266--esp32-compatibility)
+- [Platform Compatibility](#platform-compatibility)
 
 ---
 
 ## Requirements
 
-| Platform | Framework | Dependencies                                                     |
-|----------|-----------|------------------------------------------------------------------|
-| ESP8266  | Arduino   | `ESP8266WiFi`, `ESP8266WebServer`, `ESP8266HTTPClient`, `ArduinoOTA`, `EEPROM`, `LittleFS` |
-| ESP32    | Arduino   | `WiFi`, `WebServer`, `HTTPClient`, `ArduinoOTA`, `EEPROM`, `LittleFS` |
+| Platform   | Framework | Dependencies                                                                                |
+|------------|-----------|---------------------------------------------------------------------------------------------|
+| ESP8266    | Arduino   | `ESP8266WiFi`, `ESP8266WebServer`, `ESP8266HTTPClient`, `ArduinoOTA`, `EEPROM`, `LittleFS` |
+| ESP32      | Arduino   | `WiFi`, `WebServer`, `HTTPClient`, `ArduinoOTA`, `EEPROM`, `LittleFS`                       |
+| LibreTiny  | Arduino   | `WiFi`, `WebServer`, `HTTPClient`, `Update` (no ArduinoOTA, no EEPROM, no LittleFS)         |
 
 ---
 
@@ -216,6 +217,8 @@ void setEepromSize(uint16_t size)
 
 Updates the EEPROM size used by the `/eeprom` endpoints. Has effect only if called **before** `begin()`.
 
+> **LibreTiny:** EEPROM is not supported, so this call is a no-op.
+
 ---
 
 ### `buildInfoJson()`
@@ -227,6 +230,8 @@ String buildInfoJson()
 Returns a JSON string containing all system information for the device. Useful for debugging or for manually sending data to the server.
 
 The JSON includes: MAC address, IP, hostname, local port, chip ID, CPU frequency, free heap, flash sizes, SDK version, last reset reason, RSSI, SSID, uptime, firmware version, LittleFS status, and the list of registered commands.
+
+> **LibreTiny:** the following fields are omitted because the framework does not expose them: `sketchSize`, `freeSketchSpace`, `flashChipSpeed`, `heapFragmentation`, `coreVersion`, `littlefs` (and `lfsTotal`/`lfsUsed`). The `platform` field is set to `"LibreTiny"`.
 
 ---
 
@@ -242,12 +247,17 @@ The local HTTP server exposes the following endpoints. All paths are relative to
 | GET    | `/ping`           | JSON with `ok`, `id` (MAC), `uptime`, `freeHeap`, `rssi`.               |
 | GET    | `/info`           | Full system info JSON (same payload as `buildInfoJson()`).               |
 | POST   | `/cmd`            | Execute a command. JSON body: `{"command": "command_name"}`.             |
+| POST   | `/update`         | OTA firmware upload (multipart). Reboots the device on success. Used both by the dashboard *and* by `pio run -t upload` with `upload_protocol = custom` + `curl`. |
+
+### Only on ESP8266 / ESP32
+
+| Method | Path              | Description                                                              |
+|--------|-------------------|--------------------------------------------------------------------------|
 | GET    | `/eeprom`         | Read the entire EEPROM. Response: `{"ok":true,"size":N,"data":[...]}`.  |
 | POST   | `/eeprom`         | Write the EEPROM. JSON body: `{"data":[byte0, byte1, ...]}`.            |
 | POST   | `/eeprom/format`  | Erase the EEPROM (writes `0xFF` to all bytes).                          |
-| POST   | `/update`         | OTA firmware upload (multipart). Reboots the device on success.         |
 
-### Only when LittleFS is enabled
+### Only when LittleFS is enabled (ESP8266 / ESP32)
 
 | Method     | Path           | Query parameter | Description                                            |
 |------------|----------------|-----------------|--------------------------------------------------------|
@@ -260,16 +270,33 @@ The local HTTP server exposes the following endpoints. All paths are relative to
 
 ---
 
-## ESP8266 / ESP32 Compatibility
+## Platform Compatibility
 
-The library handles platform differences internally via `#if defined(ESP32)`. No changes to user code are required when switching between platforms.
+The library handles platform differences internally via `#if defined(LIBRETINY)` / `#if defined(ESP32)`. No changes to user code are required when switching between platforms (the constructor signature is identical; on LibreTiny the `eepromSize` and `littlefs` arguments are silently ignored).
 
-| Feature                 | ESP8266                    | ESP32                      |
-|-------------------------|----------------------------|----------------------------|
-| HTTP server             | `ESP8266WebServer`         | `WebServer`                |
-| HTTP client             | `ESP8266HTTPClient`        | `HTTPClient`               |
-| WiFi                    | `ESP8266WiFi`              | `WiFi`                     |
-| Reset reason            | `ESP.getResetReason()`     | `esp_reset_reason()`       |
-| Heap fragmentation      | Available                  | Not available              |
-| Flash chip real size    | Available                  | Not available              |
-| Chip ID                 | `ESP.getChipId()`          | `ESP.getEfuseMac()`        |
+| Feature                 | ESP8266                    | ESP32                      | LibreTiny                  |
+|-------------------------|----------------------------|----------------------------|----------------------------|
+| HTTP server             | `ESP8266WebServer`         | `WebServer`                | `WebServer`                |
+| HTTP client             | `ESP8266HTTPClient`        | `HTTPClient`               | `HTTPClient`               |
+| WiFi                    | `ESP8266WiFi`              | `WiFi`                     | `WiFi`                     |
+| Reset reason            | `ESP.getResetReason()`     | `esp_reset_reason()`       | `ESP.getResetReason()`     |
+| Heap fragmentation      | Available                  | Not available              | Not available              |
+| Flash chip real size    | Available                  | Not available              | Not available              |
+| Chip ID                 | `ESP.getChipId()`          | `ESP.getEfuseMac()`        | `ESP.getChipId()`          |
+| ArduinoOTA push (mDNS)  | Available                  | Available                  | **Not available**          |
+| EEPROM (`/eeprom`)      | Available                  | Available                  | **Not available**          |
+| LittleFS (`/fs/*`)      | Available                  | Available                  | **Not available**          |
+| Web OTA (`/update`)     | Available                  | Available                  | Available                  |
+
+### OTA on LibreTiny
+
+LibreTiny does not ship a push-OTA stack like `ArduinoOTA`, so the library only registers the `/update` HTTP endpoint. PlatformIO can still drive an "OTA upload" by using a `custom` upload protocol that POSTs the firmware to that same endpoint:
+
+```ini
+[env:cbu-ota]
+upload_protocol = custom
+upload_port = 192.168.1.250
+upload_command = curl -s -X POST http://${UPLOAD_PORT}/update -F "firmware=@${SOURCE}"
+```
+
+The dashboard's "OTA flash" feature uses the same endpoint via the Node.js server proxy, so no extra device-side configuration is needed.

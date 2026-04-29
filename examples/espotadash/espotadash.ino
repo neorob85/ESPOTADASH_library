@@ -4,7 +4,10 @@
   Connects to WiFi, registers the device with the ESPOTADASH dashboard server,
   exposes a set of commands, and handles OTA firmware updates.
 
-  Compatible with ESP8266 and ESP32.
+  Compatible with ESP8266, ESP32 and LibreTiny.
+  On LibreTiny, EEPROM, LittleFS and ArduinoOTA push are not available
+  (Web OTA via /update is the only OTA channel — both dashboard and
+  `pio run -t upload` go through it).
 
   You need install the ESPOTADASH server and update the WiFi credentials and server URL
   You can find the server at https://github.com/neorob85/ESPOTADASH_server.git
@@ -12,7 +15,7 @@
 
 #include <Arduino.h>
 
-#if defined(ESP32)
+#if defined(ESP32) || defined(LIBRETINY)
   #include <WiFi.h>
 #else
   #include <ESP8266WiFi.h>
@@ -43,7 +46,7 @@ void setup() {
 
   // Connect to WiFi
   WiFi.mode(WIFI_STA);
-#if !defined(ESP32)
+#if !defined(ESP32) && !defined(LIBRETINY)
   WiFi.hostname(DEVICE_NAME);
 #endif
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
