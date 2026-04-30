@@ -8,6 +8,7 @@
 #if defined(LIBRETINY)
   #include <WiFi.h>
   #include <WebServer.h>
+  #include <PrefsManager.h>
   using ESPOTADASH_WebServer = WebServer;
 #elif defined(ESP32)
   #include <ArduinoOTA.h>
@@ -57,7 +58,13 @@ private:
   void handleUpdateFinish();
   void handleUpdateUpload();
 
-#if !defined(LIBRETINY)
+#if defined(LIBRETINY)
+  void handleConfigGet();
+  void handleConfigKeySet();
+  void handleConfigKeyDelete();
+  void handleConfigNamespaceDelete();
+  void handleConfigDeleteAll();
+#else
   void handleEepromGet();
   void handleEepromWrite();
   void handleEepromFormat();
@@ -78,7 +85,9 @@ private:
   unsigned long _lastRegisterAttempt;
   bool _wasConnected;
   bool _begun;
-#if !defined(LIBRETINY)
+#if defined(LIBRETINY)
+  PrefsManager _prefs;
+#else
   uint16_t _eepromSize;
   bool _littlefsEnabled;
   bool _fsUploadOk;

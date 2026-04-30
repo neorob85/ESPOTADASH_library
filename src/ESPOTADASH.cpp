@@ -153,7 +153,13 @@ void ESPOTADASH::begin(const String& serverUrl, const String& deviceName, const 
     [this]() { this->handleUpdateFinish(); },
     [this]() { this->handleUpdateUpload(); });
 
-#if !defined(LIBRETINY)
+#if defined(LIBRETINY)
+  _httpServer.on("/config",           HTTP_GET,    [this]() { this->handleConfigGet();             });
+  _httpServer.on("/config/key",       HTTP_POST,   [this]() { this->handleConfigKeySet();          });
+  _httpServer.on("/config/key",       HTTP_DELETE, [this]() { this->handleConfigKeyDelete();       });
+  _httpServer.on("/config/namespace", HTTP_DELETE, [this]() { this->handleConfigNamespaceDelete(); });
+  _httpServer.on("/config",           HTTP_DELETE, [this]() { this->handleConfigDeleteAll();       });
+#else
   _httpServer.on("/eeprom",       HTTP_GET,  [this]() { this->handleEepromGet();   });
   _httpServer.on("/eeprom",       HTTP_POST, [this]() { this->handleEepromWrite(); });
   _httpServer.on("/eeprom/format",HTTP_POST, [this]() { this->handleEepromFormat();});
@@ -659,3 +665,113 @@ void ESPOTADASH::handleFsUploadFinish() {
 }
 
 #endif // !LIBRETINY
+
+#if defined(LIBRETINY)
+
+// ---- Config handlers (LibreTiny / PrefsManager) ----
+
+// Reads all keys of a namespace except one, erases the namespace, then rewrites
+// the remaining keys. Used to implement per-key deletion without modifying
+// PrefsManager, which only exposes namespace-level erase.
+static void _prefsDeleteKey(PrefsManager& prefs, const String& ns, const String& key) {
+  String keysStr = prefs.listKeysString(ns);
+  if (keysStr.length() == 0) return;
+
+  struct KeyData { String name, type, value; };
+  KeyData kept[16];
+  int count = 0;
+
+  auto parseEntry = [&](const String& entry) {
+    int col = entry.indexOf(':');
+    String k = col > 0 ? entry.substring(0, col) : entry;
+    String t = col > 0 ? entry.substring(col + 1) : "str";
+    if (k == key || k.length() == 0 || count >= 16) return;
+    kept[count].name = k;
+    kept[count].type = t;
+    String path = ns + "/" + k;
+    char buf64[24];
+    if      (t == "int32")  { int32_t  v = 0;     prefs.read(path, v); kept[count].value = String(v); }
+    else if (t == "uint32") { uint32_t v = 0;     prefs.read(path, v); kept[count].value = String(v); }
+    else if (t == "int64")  { int64_t  v = 0;     prefs.read(path, v); snprintf(buf64, sizeof(buf64), "%lld", (long long)v); kept[count].value = String(buf64); }
+    else if (t == "float")  { float    v = 0.0f;  prefs.read(path, v); kept[count].value = String(v, 7); }
+    else if (t == "double") { double   v = 0.0;   prefs.read(path, v); kept[count].value = String(v, 15); }
+    else if (t == "bool")   { bool     v = false; prefs.read(path, v); kept[count].value = v ? "1" : "0"; }
+    else                    { String   v;          prefs.read(path, v); kept[count].value = v; }
+    count++;
+  };
+
+  int start = 0, sep;
+  while ((sep = keysStr.indexOf(',', start)) != -1) {
+    parseEntry(keysStr.substring(start, sep));
+    start = sep + 1;
+  }
+  parseEntry(keysStr.substring(start));
+
+  prefs.erase(ns);
+
+  for (int i = 0; i < count; i++) {
+    String path = ns + "/" + kept[i].name;
+    const String& t = kept[i].type;
+    const String& v = kept[i].value;
+    if      (t == "int32")  prefs.write(path, (int32_t)v.toInt());
+    else if (t == "uint32") prefs.write(path, (uint32_t)strtoul(v.c_str(), nullptr, 10));
+    else if (t == "int64")  prefs.write(path, (int64_t)v.toInt());
+    else if (t == "float")  prefs.write(path, v.toFloat());
+    else if (t == "double") prefs.write(path, v.toDouble());
+    else if (t == "bool")   prefs.write(path, v == "1");
+    else                    prefs.write(path, v);
+  }
+}
+
+void ESPOTADASH::handleConfigGet() {
+  _httpServer.send(200, "application/json", _prefs.listAllJson());
+}
+
+void ESPOTADASH::handleConfigKeySet() {
+  String ns   = _httpServer.arg("ns");
+  String key  = _httpServer.arg("key");
+  String body = _httpServer.arg("plain");
+  if (ns.length() == 0 || key.length() == 0) {
+    _httpServer.send(400, "application/json", "{\"ok\":false,\"error\":\"missing ns or key\"}");
+    return;
+  }
+  String type  = extractJsonString(body, "type");
+  String value = extractJsonString(body, "value");
+  String path  = ns + "/" + key;
+  if      (type == "int32")  _prefs.write(path, (int32_t)value.toInt());
+  else if (type == "uint32") _prefs.write(path, (uint32_t)strtoul(value.c_str(), nullptr, 10));
+  else if (type == "int64")  _prefs.write(path, (int64_t)value.toInt());
+  else if (type == "float")  _prefs.write(path, value.toFloat());
+  else if (type == "double") _prefs.write(path, value.toDouble());
+  else if (type == "bool")   _prefs.write(path, value == "true");
+  else                       _prefs.write(path, value);
+  _httpServer.send(200, "application/json", "{\"ok\":true}");
+}
+
+void ESPOTADASH::handleConfigKeyDelete() {
+  String ns  = _httpServer.arg("ns");
+  String key = _httpServer.arg("key");
+  if (ns.length() == 0 || key.length() == 0) {
+    _httpServer.send(400, "application/json", "{\"ok\":false,\"error\":\"missing ns or key\"}");
+    return;
+  }
+  _prefsDeleteKey(_prefs, ns, key);
+  _httpServer.send(200, "application/json", "{\"ok\":true}");
+}
+
+void ESPOTADASH::handleConfigNamespaceDelete() {
+  String ns = _httpServer.arg("ns");
+  if (ns.length() == 0) {
+    _httpServer.send(400, "application/json", "{\"ok\":false,\"error\":\"missing ns\"}");
+    return;
+  }
+  _prefs.erase(ns);
+  _httpServer.send(200, "application/json", "{\"ok\":true}");
+}
+
+void ESPOTADASH::handleConfigDeleteAll() {
+  _prefs.eraseAll();
+  _httpServer.send(200, "application/json", "{\"ok\":true}");
+}
+
+#endif // LIBRETINY
